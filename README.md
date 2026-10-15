@@ -1,8 +1,9 @@
 --[[
-    Auto-Rope + Webhook (standalone) — Hit Edition
+    Auto-Rope + Webhook (standalone) — Hit Edition v2
     - Sem toggle
-    - So cordeia quando VOCE da hit no alvo (nao repoe sozinho, sem polling)
-    - Manda webhook no Discord com quem executou
+    - So cordeia quando VOCE da hit (multiplos sinais de deteccao)
+    - Rede de seguranca: se nada for detectado, cordeia no ragdoll
+    - Sem polling (nao repoe sozinho)
 ]]
 
 local Players = game:GetService("Players")
@@ -15,20 +16,20 @@ local WEBHOOK_URL =
 	"https://discord.com/api/webhooks/1560064635598544947/1THcsUZgjHqHhJ1ZiNEiNDd1n_-Ku4uDERaj0BzjxZAszaVMmOT-BsWBcHitoW2tKHLG"
 
 local CONFIG = {
-	SelectedPart = "Torso",   -- parte do corpo pra cordear
-	RandomizePart = false,    -- true = escolhe uma parte aleatoria
+	SelectedPart = "Torso",
+	RandomizePart = false,
 
-	-- Hit
-	HitWindow = 0.8,          -- (s) apos seu hit: se o alvo ragdollar nesse tempo, a corda vai nele
-	MaxDistance = 18,         -- alcance (studs) pra achar quem voce acertou
-	InFrontOnly = false,      -- true = so considera alvo na sua frente
-	UseActivatedFallback = true, -- tambem detecta o swing pelo Tool.Activated
-	Debug = false,            -- true = printa as acoes detectadas
+	HitWindow = 1.2,          -- (s) apos seu hit pra considerar o ragdoll como seu
+	MaxDistance = 20,         -- alcance (studs) pra validar o alvo
+	InFrontOnly = false,      -- true = so alvo na sua frente
 
-	-- Retentativas (so logo apos o hit)
-	RetryCount = 3,           -- coloque 1 pra disparar UMA vez so
+	UseActivatedFallback = true,   -- swing pelo clique do Tool
+	UseAnimationFallback = true,   -- swing pela animacao de ataque
+	Debug = true,                  -- true = printa o que esta detectando
+
+	RetryCount = 3,
 	RetryDelay = 0.1,
-	RopeCooldown = 0.4,       -- evita cordear o mesmo alvo varias vezes seguidas
+	RopeCooldown = 0.4,
 }
 
 local PARTS = { "Head", "Torso", "Left Arm", "Right Arm", "Left Leg", "Right Leg" }
@@ -41,7 +42,6 @@ local PART_PRIORITY = {
 	"LeftHand", "RightHand", "LeftFoot", "RightFoot",
 }
 
--- ================== ESTADO ==================
 local lastHit = 0
 local LastRoped = {}
 
@@ -51,26 +51,21 @@ local function Log(...)
 	end
 end
 
+local function WithinHitWindow()
+	-- se nunca detectamos um swing, libera (rede de seguranca)
+	return lastHit == 0 or (tick() - lastHit) <= CONFIG.HitWindow
+end
+
 -- ================== WEBHOOK ==================
 local function httpPost(url, body)
 	local req = request or http_request or (syn and syn.request) or (fluxus and fluxus.request)
 	if req then
 		return pcall(function()
-			req({
-				Url = url,
-				Method = "POST",
-				Headers = { ["Content-Type"] = "application/json" },
-				Body = body,
-			})
+			req({ Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
 		end)
 	end
 	return pcall(function()
-		HttpService:RequestAsync({
-			Url = url,
-			Method = "POST",
-			Headers = { ["Content-Type"] = "application/json" },
-			Body = body,
-		})
+		HttpService:RequestAsync({ Url = url, Method = "POST", Headers = { ["Content-Type"] = "application/json" }, Body = body })
 	end)
 end
 
@@ -78,45 +73,31 @@ local function SendExecuteWebhook()
 	task.spawn(function()
 		local plr = Players.LocalPlayer
 		if not plr then return end
-
 		local executor = "Desconhecido"
 		local ok, name = pcall(function()
 			return (identifyexecutor and identifyexecutor()) or (getexecutorname and getexecutorname())
 		end)
-		if ok and name then
-			executor = tostring(name)
-		end
+		if ok and name then executor = tostring(name) end
 
 		local payload = {
 			username = "Auto-Rope Logger",
-			embeds = {
-				{
-					title = "Auto-Rope Executado",
-					color = 3066993,
-					thumbnail = {
-						url = "https://www.roblox.com/headshot-thumbnail/image?userId="
-							.. plr.UserId
-							.. "&width=150&height=150&format=png",
-					},
-					fields = {
-						{ name = "Usuario", value = plr.Name, inline = true },
-						{ name = "Display Name", value = plr.DisplayName, inline = true },
-						{ name = "User ID", value = tostring(plr.UserId), inline = true },
-						{ name = "Executor", value = executor, inline = true },
-						{ name = "Place ID", value = tostring(game.PlaceId), inline = true },
-						{ name = "Job ID", value = tostring(game.JobId), inline = false },
-						{
-							name = "Perfil",
-							value = "https://www.roblox.com/users/" .. plr.UserId .. "/profile",
-							inline = false,
-						},
-					},
-					timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
-					footer = { text = "Auto-Rope" },
+			embeds = { {
+				title = "Auto-Rope Executado",
+				color = 3066993,
+				thumbnail = { url = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. plr.UserId .. "&width=150&height=150&format=png" },
+				fields = {
+					{ name = "Usuario", value = plr.Name, inline = true },
+					{ name = "Display Name", value = plr.DisplayName, inline = true },
+					{ name = "User ID", value = tostring(plr.UserId), inline = true },
+					{ name = "Executor", value = executor, inline = true },
+					{ name = "Place ID", value = tostring(game.PlaceId), inline = true },
+					{ name = "Job ID", value = tostring(game.JobId), inline = false },
+					{ name = "Perfil", value = "https://www.roblox.com/users/" .. plr.UserId .. "/profile", inline = false },
 				},
-			},
+				timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+				footer = { text = "Auto-Rope" },
+			} },
 		}
-
 		httpPost(WEBHOOK_URL, HttpService:JSONEncode(payload))
 	end)
 end
@@ -128,18 +109,14 @@ end
 
 local function FindRopePart(char)
 	if not char then return nil end
-
 	for _, name in ipairs(PART_PRIORITY) do
 		local p = char:FindFirstChild(name)
 		if IsValidPart(p) then return p end
 	end
-
 	local best
 	for _, d in ipairs(char:GetDescendants()) do
 		if IsValidPart(d) and not d:IsA("Accessory") and d.Name ~= "Handle" then
-			if not best or (d.Mass or 0) > (best.Mass or 0) then
-				best = d
-			end
+			if not best or (d.Mass or 0) > (best.Mass or 0) then best = d end
 		end
 	end
 	return best
@@ -165,20 +142,17 @@ end
 
 local function IsRagdolled(plr)
 	if not plr then return false end
-
 	local stats = GetStatsModule(plr)
 	if stats then
 		local rag = stats:FindFirstChild("Ragdoll")
 		if rag and rag.Value then return true end
 	end
-
 	local char = plr.Character
 	if char then
 		local hum = char:FindFirstChildOfClass("Humanoid")
 		if hum then
 			local st = hum:GetState()
-			if st == Enum.HumanoidStateType.FallingDown
-				or st == Enum.HumanoidStateType.Physics then
+			if st == Enum.HumanoidStateType.FallingDown or st == Enum.HumanoidStateType.Physics then
 				return true
 			end
 			if Enum.HumanoidStateType.Ragdoll and st == Enum.HumanoidStateType.Ragdoll then
@@ -186,17 +160,31 @@ local function IsRagdolled(plr)
 			end
 		end
 	end
-
 	return false
+end
+
+local function IsInFront(myHrp, targetPos)
+	local dir = targetPos - myHrp.Position
+	if dir.Magnitude < 0.01 then return true end
+	return dir.Unit:Dot(myHrp.CFrame.LookVector) > 0.2
+end
+
+local function IsValidTarget(plr)
+	local myChar = player.Character
+	local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
+	local char = plr.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not myHrp or not hrp then return false end
+	if (myHrp.Position - hrp.Position).Magnitude > CONFIG.MaxDistance then return false end
+	if CONFIG.InFrontOnly and not IsInFront(myHrp, hrp.Position) then return false end
+	return true
 end
 
 -- ================== AUTO-ROPE ==================
 local function GetBeast()
 	for _, v in ipairs(Players:GetPlayers()) do
 		local char = v.Character
-		if char and char:FindFirstChild("BeastPowers") then
-			return char
-		end
+		if char and char:FindFirstChild("BeastPowers") then return char end
 	end
 	return nil
 end
@@ -204,23 +192,16 @@ end
 local function FireRope(TargetPlayer)
 	local beast = GetBeast()
 	if not beast then return false end
-
 	local Hammer = beast:FindFirstChild("Hammer")
 	if not Hammer then return false end
-
 	local HammerEvent = Hammer:FindFirstChild("HammerEvent")
 	if not HammerEvent then return false end
-
 	local char = TargetPlayer.Character
 	if not char then return false end
-
 	local targetPart = ResolveTargetPart(char)
 	if not targetPart then return false end
 
-	local hrp = char:FindFirstChild("HumanoidRootPart")
-	local pos = targetPart.Position
-
-	HammerEvent:FireServer("HammerTieUp", targetPart, pos)
+	HammerEvent:FireServer("HammerTieUp", targetPart, targetPart.Position)
 	return true
 end
 
@@ -232,10 +213,8 @@ end
 local function RopeTarget(plr)
 	if not plr or not plr.Character then return end
 	if not CanRope(plr) then return end
-
 	LastRoped[plr] = tick()
 	Log("Cordeando", plr.Name)
-
 	task.spawn(function()
 		for _ = 1, math.max(1, CONFIG.RetryCount) do
 			if not plr or not plr.Character then return end
@@ -245,33 +224,14 @@ local function RopeTarget(plr)
 	end)
 end
 
--- ================== DETECCAO DE HIT ==================
-local function IsInFront(myHrp, targetPos)
-	local dir = targetPos - myHrp.Position
-	if dir.Magnitude < 0.01 then return true end
-	return dir.Unit:Dot(myHrp.CFrame.LookVector) > 0.25
-end
-
--- Acha o alvo que voce acabou de acertar (caido e perto de voce)
 local function FindHitTarget()
-	local myChar = player.Character
-	local myHrp = myChar and myChar:FindFirstChild("HumanoidRootPart")
-
 	local best, bestDist
 	for _, plr in ipairs(Players:GetPlayers()) do
-		if plr ~= player and IsRagdolled(plr) then
-			local char = plr.Character
-			local hrp = char and char:FindFirstChild("HumanoidRootPart")
-			if hrp then
-				local dist = myHrp and (myHrp.Position - hrp.Position).Magnitude or 0
-				local ok = dist <= CONFIG.MaxDistance
-				if ok and CONFIG.InFrontOnly and myHrp then
-					ok = IsInFront(myHrp, hrp.Position)
-				end
-				if ok and (not bestDist or dist < bestDist) then
-					best, bestDist = plr, dist
-				end
-			end
+		if plr ~= player and IsRagdolled(plr) and IsValidTarget(plr) then
+			local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+			local myHrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+			local dist = (myHrp and hrp) and (myHrp.Position - hrp.Position).Magnitude or 0
+			if not bestDist or dist < bestDist then best, bestDist = plr, dist end
 		end
 	end
 	return best
@@ -279,18 +239,13 @@ end
 
 local function RegisterSwing(targetHint)
 	lastHit = tick()
-
 	if targetHint then
-		-- se o alvo ja esta caido, cordeia agora; senao o evento de ragdoll cuida
-		if IsRagdolled(targetHint) then
+		if IsRagdolled(targetHint) and IsValidTarget(targetHint) then
 			RopeTarget(targetHint)
 		end
 	else
-		-- sem alvo nos args: se tem alguem caido perto, considera como acerto
 		local t = FindHitTarget()
-		if t then
-			RopeTarget(t)
-		end
+		if t then RopeTarget(t) end
 	end
 end
 
@@ -298,45 +253,39 @@ local function OnRemote(args)
 	local action = args[1]
 	if type(action) == "string" then
 		Log("acao:", action)
-		if action:lower():find("tie") then
-			return -- nosso proprio tie
-		end
+		if action:lower():find("tie") then return end
 	end
 
-	-- tenta achar um Player/character nos args (alguns jogos mandam o alvo)
-	local targetHint
+	local hint
 	for _, a in ipairs(args) do
-		if typeof(a) == "Instance" then
+		if typeof(a) == "Instance" and a:IsA("Model") then
 			local p = Players:GetPlayerFromCharacter(a)
-			if not p and a:IsA("Player") then p = a end
-			if p and p ~= player then
-				targetHint = p
-				break
-			end
+			if p and p ~= player then hint = p break end
+		elseif typeof(a) == "Instance" and a:IsA("Player") and a ~= player then
+			hint = a
+			break
 		end
 	end
 
-	RegisterSwing(targetHint)
+	RegisterSwing(hint)
 end
 
--- ================== MONITOR ==================
+-- ================== MONITOR DOS OUTROS ==================
 local function MonitorPlayer(plr)
 	if plr == player then return end
 
-	local humConns = {}
+	local conns = {}
 
 	local function bindChar(char)
-		for _, c in ipairs(humConns) do c:Disconnect() end
-		humConns = {}
-
+		for _, c in ipairs(conns) do c:Disconnect() end
+		conns = {}
 		local hum = char:WaitForChild("Humanoid", 30)
 		if not hum then return end
-
-		table.insert(humConns, hum.StateChanged:Connect(function(_, new)
+		table.insert(conns, hum.StateChanged:Connect(function(_, new)
 			if new == Enum.HumanoidStateType.FallingDown
 				or new == Enum.HumanoidStateType.Physics
 				or (Enum.HumanoidStateType.Ragdoll and new == Enum.HumanoidStateType.Ragdoll) then
-				if (tick() - lastHit) <= CONFIG.HitWindow then
+				if WithinHitWindow() and IsValidTarget(plr) then
 					RopeTarget(plr)
 				end
 			end
@@ -346,12 +295,10 @@ local function MonitorPlayer(plr)
 	task.spawn(function()
 		local stats = plr:WaitForChild("TempPlayerStatsModule", 60)
 		if not stats then return end
-
 		local ragdoll = stats:WaitForChild("Ragdoll", 60)
 		if not ragdoll then return end
-
 		ragdoll.Changed:Connect(function(isRagdolled)
-			if isRagdolled and (tick() - lastHit) <= CONFIG.HitWindow then
+			if isRagdolled and WithinHitWindow() and IsValidTarget(plr) then
 				RopeTarget(plr)
 			end
 		end)
@@ -365,71 +312,95 @@ local function MonitorPlayer(plr)
 end
 
 -- ================== HOOK DO HAMMER (SEU HIT) ==================
-local function BindHammer(char)
-	local hammer = char:WaitForChild("Hammer", 20)
-	if not hammer then return end
-
-	local remote = hammer:WaitForChild("HammerEvent", 20)
-	if remote then
-		remote.OnClientEvent:Connect(function(...)
-			OnRemote({ ... })
-		end)
+local function GetLocalHammer()
+	local c = player.Character
+	if c then
+		local h = c:FindFirstChild("Hammer")
+		if h then return h end
 	end
-
-	if CONFIG.UseActivatedFallback and hammer:IsA("Tool") then
-		hammer.Activated:Connect(function()
-			RegisterSwing(nil)
-		end)
-	end
+	local b = GetBeast()
+	if b then return b:FindFirstChild("Hammer") end
+	return nil
 end
 
-local function SetupNamecallHook()
-	if not (getrawmetatable and setreadonly and hookmetamethod and getnamecallmethod and newcclosure) then
-		Log("sem hookmetamethod, usando apenas fallbacks")
-		return
+local localConns = {}
+local function BindLocal()
+	for _, c in ipairs(localConns) do c:Disconnect() end
+	localConns = {}
+
+	local char = player.Character
+	if char and CONFIG.UseAnimationFallback then
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if animator then
+			table.insert(localConns, animator.AnimationPlayed:Connect(function(track)
+				local name = track.Animation and track.Animation.Name
+				if not name then return end
+				local n = name:lower()
+				if n:find("idle") or n:find("walk") or n:find("run") or n:find("jump")
+					or n:find("fall") or n:find("climb") or n:find("swim") or n:find("sit")
+					or n:find("none") or n:find("pose") then
+					return
+				end
+				RegisterSwing(nil)
+			end))
+		end
 	end
-	pcall(function()
+
+	task.spawn(function()
+		local hammer
+		for _ = 1, 40 do
+			hammer = GetLocalHammer()
+			if hammer then break end
+			task.wait(0.25)
+		end
+		if not hammer then Log("Hammer nao encontrado") return end
+		Log("Hammer encontrado:", hammer:GetFullName())
+
+		local remote = hammer:FindFirstChild("HammerEvent")
+		if remote then
+			table.insert(localConns, remote.OnClientEvent:Connect(function(...) OnRemote({ ... }) end))
+		end
+		if CONFIG.UseActivatedFallback and hammer:IsA("Tool") then
+			table.insert(localConns, hammer.Activated:Connect(function() RegisterSwing(nil) end))
+		end
+	end)
+end
+
+local function SetupHook()
+	local has = getrawmetatable and setreadonly and getnamecallmethod
+	if not has then Log("sem hookmetamethod (usando fallbacks)") return end
+	local ok, err = pcall(function()
 		local mt = getrawmetatable(game)
 		local old = mt.__namecall
 		setreadonly(mt, false)
 		mt.__namecall = newcclosure(function(self, ...)
-			if getnamecallmethod() == "FireServer"
-				and typeof(self) == "Instance"
-				and self.Name == "HammerEvent" then
+			if getnamecallmethod() == "FireServer" and typeof(self) == "Instance" and self.Name == "HammerEvent" then
 				OnRemote({ ... })
 			end
 			return old(self, ...)
 		end)
 		setreadonly(mt, true)
 	end)
+	Log("hook __namecall:", ok, err)
 end
 
 -- ================== START ==================
-if not game:IsLoaded() then
-	game.Loaded:Wait()
-end
+if not game:IsLoaded() then game.Loaded:Wait() end
 
+print("[AutoRope] carregado")
 SendExecuteWebhook()
-SetupNamecallHook()
+SetupHook()
 
-for _, plr in ipairs(Players:GetPlayers()) do
-	MonitorPlayer(plr)
-end
-
+for _, plr in ipairs(Players:GetPlayers()) do MonitorPlayer(plr) end
 Players.PlayerAdded:Connect(MonitorPlayer)
+Players.PlayerRemoving:Connect(function(plr) LastRoped[plr] = nil end)
 
-Players.PlayerRemoving:Connect(function(plr)
-	LastRoped[plr] = nil
+player.CharacterAdded:Connect(function()
+	task.wait(0.5)
+	BindLocal()
 end)
-
-local function onChar(char)
-	BindHammer(char)
-end
-
-if player.Character then
-	onChar(player.Character)
-end
-player.CharacterAdded:Connect(onChar)
+BindLocal()
 
 pcall(function()
 	game:GetService("StarterGui"):SetCore("SendNotification", {
